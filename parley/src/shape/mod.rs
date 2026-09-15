@@ -124,8 +124,12 @@ pub(crate) fn shape_text<'a, B: Brush>(
             script = item.script;
         }
         let level = levels.get(char_index).copied().unwrap_or(0);
+        // The style index of the item that is about to be flushed must stay the one the item
+        // was shaped under, so it is advanced below, next to the item's other fields, rather
+        // than here. `LayoutData::push_run` reads `line_height` through it.
+        let mut next_style_index = None;
         if item.style_index != *style_index {
-            item.style_index = *style_index;
+            next_style_index = Some(*style_index);
             style = &styles[*style_index as usize];
             if !nearly_eq(style.font_size, item.size)
                 || style.locale != item.locale
@@ -187,6 +191,10 @@ pub(crate) fn shape_text<'a, B: Brush>(
             item.letter_spacing = style.letter_spacing;
             text_range.start = text_range.end;
             char_range.start = char_range.end;
+        }
+
+        if let Some(next_style_index) = next_style_index {
+            item.style_index = next_style_index;
         }
 
         if let Some(deferred_boxes) = deferred_boxes {

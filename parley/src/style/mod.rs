@@ -41,6 +41,35 @@ pub enum LineHeight {
     /// spaced a whole number of pixels apart, or fitting lines into a given layout container
     /// height.
     Absolute(f32),
+    /// The line is sized to contain the ascent and descent of *every* font used on it, not
+    /// only of the first available font. This is how the CSS `line-height: normal` keyword
+    /// behaves.
+    ///
+    /// CSS Inline Layout 3 [§5.3] sizes a line box "to exactly include the aligned layout
+    /// bounds of all its inline-level boxes", where those bounds are an ascent `A` above and
+    /// a descent `D` below the baseline, and states that "metrics from fonts other than the
+    /// first available font only impact the layout bounds of an inline box with
+    /// `line-height: normal`". CSS 2.1 [§10.8.1] says the same thing less precisely: "when an
+    /// element contains text that is rendered in more than one font, user agents may determine
+    /// the `normal` line-height value according to the largest font size".
+    ///
+    /// Every other variant is a fixed height that fallback fonts must *not* grow, so this is
+    /// the only variant that consults the fonts a run actually resolved to.
+    ///
+    /// The fields are the *strut*: the ascent and descent of the style's first available font
+    /// at its used size, as positive distances from the baseline. The strut contributes to the
+    /// line box even on a line where no glyph is drawn from that font, so it is supplied by the
+    /// caller — which is the only party that knows the style's family list — rather than
+    /// rediscovered per run.
+    ///
+    /// [§5.3]: https://drafts.csswg.org/css-inline-3/#inline-height
+    /// [§10.8.1]: https://www.w3.org/TR/CSS21/visudet.html#line-height
+    Normal {
+        /// Ascent of the first available font, a positive distance above the baseline.
+        strut_ascent: f32,
+        /// Descent of the first available font, a positive distance below the baseline.
+        strut_descent: f32,
+    },
 }
 
 impl Default for LineHeight {
@@ -55,6 +84,16 @@ impl LineHeight {
             (Self::MetricsRelative(a), Self::MetricsRelative(b))
             | (Self::FontSizeRelative(a), Self::FontSizeRelative(b))
             | (Self::Absolute(a), Self::Absolute(b)) => nearly_eq(a, b),
+            (
+                Self::Normal {
+                    strut_ascent: a_asc,
+                    strut_descent: a_desc,
+                },
+                Self::Normal {
+                    strut_ascent: b_asc,
+                    strut_descent: b_desc,
+                },
+            ) => nearly_eq(a_asc, b_asc) && nearly_eq(a_desc, b_desc),
             _ => false,
         }
     }
@@ -62,6 +101,14 @@ impl LineHeight {
     pub(crate) fn scale(self, scale: f32) -> Self {
         match self {
             Self::Absolute(value) => Self::Absolute(value * scale),
+            // The strut is in the same absolute units as `Absolute`.
+            Self::Normal {
+                strut_ascent,
+                strut_descent,
+            } => Self::Normal {
+                strut_ascent: strut_ascent * scale,
+                strut_descent: strut_descent * scale,
+            },
             // The other variants are relative to the font size, so scaling here needn't do anything
             value => value,
         }

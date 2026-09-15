@@ -415,6 +415,7 @@ impl<B: Brush> LayoutData<B> {
         };
         let units_per_em = metrics.units_per_em as f32;
 
+        let quantize = self.quantize;
         let metrics = {
             let (underline_offset, underline_size) = if let Some(underline) = metrics.underline {
                 (underline.offset, underline.thickness)
@@ -433,11 +434,39 @@ impl<B: Brush> LayoutData<B> {
 
             // Compute line height
             let style = &self.styles[style_index as usize];
+            let normal_strut = match style.line_height {
+                LineHeight::Normal {
+                    strut_ascent,
+                    strut_descent,
+                } => Some((strut_ascent, strut_descent)),
+                _ => None,
+            };
             let line_height = match style.line_height {
                 LineHeight::Absolute(value) => value,
                 LineHeight::FontSizeRelative(value) => value * font_size,
                 LineHeight::MetricsRelative(value) => {
                     (metrics.ascent - metrics.descent + metrics.leading) * value
+                }
+                // `normal` is resolved from the font this run actually resolved to, unioned
+                // with the strut. Each metric is rounded to a whole pixel before summing, the
+                // way Chromium does (`FontMetrics::AscentDescentWithHacks` rounds through
+                // `SkScalarRoundToScalar`, and `FontMetrics::FloatHeight` then sums the two
+                // with the line gap excluded).
+                //
+                // This is only a lower bound on the eventual line height: a line that mixes
+                // fonts takes the union of the ascents and the union of the descents, which
+                // `LineBreaker::finish_line` computes once every run on the line is known.
+                LineHeight::Normal {
+                    strut_ascent,
+                    strut_descent,
+                } => {
+                    let ascent = metrics.ascent.max(strut_ascent);
+                    let descent = (-metrics.descent).max(strut_descent);
+                    if quantize {
+                        ascent.round() + descent.round()
+                    } else {
+                        ascent + descent
+                    }
                 }
             };
 
@@ -450,6 +479,7 @@ impl<B: Brush> LayoutData<B> {
                 strikethrough_offset,
                 strikethrough_size,
                 line_height,
+                normal_strut,
                 x_height: metrics.x_height,
                 cap_height: metrics.cap_height,
             }

@@ -238,6 +238,17 @@ pub struct RunMetrics {
     pub strikethrough_size: f32,
     /// The line height
     pub line_height: f32,
+    /// The strut of the run's style when its `line-height` is [`LineHeight::Normal`], as the
+    /// positive ascent and descent of the first available font; `None` for every other
+    /// `line-height`.
+    ///
+    /// This is what tells line breaking that the run's *own* font metrics are allowed to grow
+    /// the line box. CSS Inline Layout 3 §5.3: "metrics from fonts other than the first
+    /// available font only impact the layout bounds of an inline box with
+    /// `line-height: normal`".
+    ///
+    /// [`LineHeight::Normal`]: crate::LineHeight::Normal
+    pub normal_strut: Option<(f32, f32)>,
     /// Distance from the baseline to the top of short lowercase letters.
     pub x_height: Option<f32>,
     /// Distance from the baseline to the top of capital letters.
