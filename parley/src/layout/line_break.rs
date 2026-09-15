@@ -17,7 +17,7 @@ use crate::layout::{
     LineMetrics, Run,
 };
 use crate::style::Brush;
-use crate::{InlineBoxKind, OverflowWrap, TextWrapMode};
+use crate::{InlineBoxKind, LineHeight, OverflowWrap, TextWrapMode};
 
 use core::ops::Range;
 
@@ -351,7 +351,10 @@ impl<'a, B: Brush> BreakLines<'a, B> {
         self.state.prev_boundary = None;
         self.state.emergency_boundary = None;
 
-        self.finish_line(self.lines.lines.len() - 1, line_height);
+        // `finish_line` is what knows every run on the line, so on a `line-height: normal`
+        // line it is what settles the final height; advance by what it returns, not by the
+        // running lower bound.
+        let line_height = self.finish_line(self.lines.lines.len() - 1, line_height);
 
         self.state.line_y += line_height as f64;
 
@@ -895,7 +898,8 @@ impl<'a, B: Brush> BreakLines<'a, B> {
         }
     }
 
-    fn finish_line(&mut self, line_idx: usize, line_height: f32) {
+    /// Finalise one line's metrics and return its height.
+    fn finish_line(&mut self, line_idx: usize, line_height: f32) -> f32 {
         let prev_line_metrics = match line_idx {
             0 => None,
             idx => Some(self.lines.lines[idx - 1].metrics),
@@ -915,6 +919,20 @@ impl<'a, B: Brush> BreakLines<'a, B> {
             line.text_range = self.layout.data.text_len..self.layout.data.text_len;
         }
         // Compute metrics for the line, but ignore trailing whitespace.
+        //
+        // `normal_bounds` accumulates the layout bounds of the text whose own `line-height` is
+        // `normal`, and only that: its run's font metrics unioned with its own strut.
+        //
+        // The scope matters. CSS Inline Layout 3 §5.3 is per inline box -- "when its computed
+        // line-height is not normal, its layout bounds are derived solely from metrics of its
+        // first available font" -- and Chromium gates `AccumulateUsedFonts` per
+        // `InlineBoxState` before uniting each box into its parent. A run whose line height is
+        // a fixed length therefore contributes that length and nothing else; its font metrics
+        // must not resolve a `normal` sibling's height.
+        //
+        // Atomic inline boxes are excluded for the same reason: they reach the line through
+        // `line.metrics.ascent` and vertical alignment, not through font metrics.
+        let mut normal_bounds: Option<(f32, f32)> = None;
         let mut have_metrics = false;
         let mut needs_reorder = false;
         for line_item in self.lines.line_items[line.item_range.clone()]
@@ -965,6 +983,27 @@ impl<'a, B: Brush> BreakLines<'a, B> {
                     let run = &self.layout.data.runs[line_item.index];
                     line.metrics.ascent = line.metrics.ascent.max(run.metrics.ascent);
                     line.metrics.descent = line.metrics.descent.max(run.metrics.descent);
+                    // The scope is the inline box, and a run can straddle two of them: the
+                    // shaper only breaks a run where the font, script or spacing changes, not
+                    // where `line-height` does, and breaking it there would change shaping
+                    // across the boundary. So read the style per cluster, which is where
+                    // parley records it, rather than per run.
+                    for cluster in &self.layout.data.clusters[line_item.cluster_range.clone()] {
+                        let style = &self.layout.data.styles[cluster.style_index as usize];
+                        if let LineHeight::Normal {
+                            strut_ascent,
+                            strut_descent,
+                        } = style.line_height
+                        {
+                            let ascent = run.metrics.ascent.max(strut_ascent);
+                            let descent = run.metrics.descent.max(strut_descent);
+                            normal_bounds = Some(match normal_bounds {
+                                Some((a, d)) => (a.max(ascent), d.max(descent)),
+                                None => (ascent, descent),
+                            });
+                            break;
+                        }
+                    }
 
                     // Mark us as having seen non-whitespace content on this line
                     have_metrics = true;
@@ -1049,6 +1088,29 @@ impl<'a, B: Brush> BreakLines<'a, B> {
             }
         }
 
+        // CSS Inline Layout 3 §5.3: a line box "is sized to exactly include the aligned layout
+        // bounds of all its inline-level boxes", and "metrics from fonts other than the first
+        // available font only impact the layout bounds of an inline box with
+        // `line-height: normal`". So the `normal` runs on the line contribute the union of
+        // their own bounds, as an ascent and a descent unioned separately rather than as a
+        // taller of two heights -- Chromium unites `FontHeight`, which is that pair.
+        //
+        // Rounding each of the two to a whole pixel before summing is Chromium's convention
+        // (`FontMetrics::AscentDescentWithHacks` -> `SkScalarRoundToScalar`, summed by
+        // `FontMetrics::FloatHeight`). Rounding is monotonic, so rounding the union is the same
+        // as uniting the rounded metrics, which is the order Chromium happens to use.
+        //
+        // The height is a `max` with the running value so that a line mixing `normal` runs with
+        // runs whose `line-height` is a fixed length still honours the fixed one.
+        if let Some((ascent, descent)) = normal_bounds {
+            let normal_height = if self.layout.data.quantize {
+                ascent.round() + descent.round()
+            } else {
+                ascent + descent
+            };
+            line.metrics.line_height = line.metrics.line_height.max(normal_height);
+        }
+
         line.metrics.leading =
             line.metrics.line_height - (line.metrics.ascent + line.metrics.descent);
 
@@ -1097,6 +1159,8 @@ impl<'a, B: Brush> BreakLines<'a, B> {
 
         line.metrics.inline_min_coord = self.state.line_x;
         line.metrics.inline_max_coord = self.state.line_x + self.state.line_max_advance;
+
+        line.metrics.line_height
     }
 }
 
